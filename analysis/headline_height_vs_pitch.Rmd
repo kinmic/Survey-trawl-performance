@@ -1,0 +1,137 @@
+---
+title: "Pitch_headline_analysis"
+author: "M.Kinneen"
+date: "2023-01-24"
+output: html_document
+---
+##Set up env
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(fuzzyjoin)
+library(data.table)
+library(ggplot2)
+library(stringr)
+library(readr)
+
+#Read in data
+sensor_data_processed <- read.csv(file="../data/processed/sensor_data_processed_igfs_2018.csv")
+summarised_pitch_per_min <- read.csv(file="../data/processed/pitch_summarised_by_minute.csv")%>%
+  mutate(timestamp = as.POSIXct(timestamp))
+
+sensor_data_summary <- read.csv(file="../data/processed/sensor_data_summary_igfs_2018.csv")
+poor_weather_hauls<-read.csv("../data/processed/poor_weather_hauls.csv")
+
+```
+
+## Restructure
+
+Create timestamps of the same format for both datasets, which can then be used as primary key.
+```{r }
+
+sensor_data_processed%>%
+  mutate(SensorTime = NumToTime(SensorTime,as.Date(date_shot)),
+         date_shot = as.Date(date_shot))%>%
+  mutate(sensor_datetime = 
+           as.POSIXct(paste(date_shot,SensorTime),format="%Y-%m-%d %H:%M:%S"
+))->sensor_data_processed
+
+```
+
+## Analysis
+
+To explore for a relationship between headline height and vessel pitch, pitch will be observed in 3 different ways.
+ i) Summed total absolute pitch per time ( 1,5,10 minute intervals)
+ ii) Instantaneous stern velocity (Politis et al)
+ iii) 0 crossings?
+
+### Summed absolut pitch per time
+```{r }
+
+sensor_data_processed%>%
+  select(fldCruiseStationNumber,sensor_datetime,TEY_height,SweepLngt_m)%>%
+  group_by(sensor_datetime = as.POSIXct(cut(sensor_datetime, breaks="1 min")),
+           fldCruiseStationNumber,SweepLngt_m) %>%
+  summarize(trawl_eye_height_median = median(TEY_height,na.rm=TRUE),
+            trawl_eye_height_var = var(TEY_height,na.rm=TRUE))%>%
+  rename(timestamp = sensor_datetime)->summarised_height_per_min
+
+#Recode
+
+#Join pitch and height datasets
+summarised_pitch_per_min<-as.data.table(summarised_pitch_per_min)
+summarised_height_per_min<-as.data.table(summarised_height_per_min)
+
+#combine data.tables
+pitch_height_combined<-as.data.table(summarised_pitch_per_min)[summarised_height_per_min, on = .(timestamp), roll = TRUE]
+
+
+#Absolut pitch vs headline per min
+#If pattern present, should be observable in hauls with poor weather
+#Look at 10 hauls with highest mean wind speed.
+
+#Median headline height
+pitch_height_combined%>%
+  filter(fldCruiseStationNumber %in% poor_weather_hauls$fldCruiseStationNumber)%>%
+  
+  ggplot(aes(y=trawl_eye_height_median,x=absolute_pitch_per_min,colour=SweepLngt_m))+
+  geom_point()+
+  facet_wrap(~fldCruiseStationNumber)
+
+
+#Median headline height
+pitch_height_combined%>%
+  filter(fldCruiseStationNumber %in% poor_weather_hauls$fldCruiseStationNumber)%>%
+  filter(trawl_eye_height_var<3.5)%>%
+  
+  ggplot(aes(y=trawl_eye_height_var,x=absolute_pitch_per_min,colour=SweepLngt_m))+
+  geom_point()+
+  facet_wrap(~fldCruiseStationNumber)
+
+
+
+
+```
+```{r}
+
+sensor_data_summary%>%
+  filter(ObsPitch_deg < 30 & door_dist_Median > 100)%>%
+  
+  ggplot(aes(x= ObsPitch_deg,y=door_dist_Median,colour=SweepLngt_m))+
+  geom_point()+
+  facet_wrap(~SweepLngt_m)+
+  stat_smooth(method = "loess")
+
+#For var
+sensor_data_summary%>%
+  filter(ObsPitch_deg < 30 & door_dist_sd < 10)%>%
+  
+  ggplot(aes(x= ObsPitch_deg,y=door_dist_sd,colour=SweepLngt_m))+
+  geom_point()+
+  facet_wrap(~SweepLngt_m)+
+  stat_smooth(method = "loess")
+
+
+library(mgcv)
+
+gam_data<-sensor_data_summary%>%filter(ObsPitch_deg < 30 & door_dist_Median > 70)
+
+gam_1<-gam(TEY_height_sd ~ s(ObsPitch_deg),
+    data=gam_data,
+    method="REML")
+
+summary(gam_1)
+plot(gam_1, residuals = TRUE)
+
+
+gam_2<-gam(trawl_eye_height_median ~ s(absolute_pitch_per_min),
+           data=pitch_height_combined,method="REML")
+summary(gam_2)
+plot(gam_2)
+
+```
+
+
+
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.

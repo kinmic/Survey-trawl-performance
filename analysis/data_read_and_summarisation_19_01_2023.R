@@ -16,6 +16,7 @@ library(GGally)
 library(lmtest)
 library(kableExtra)
 library(caret)
+library(lubridate)
 
 
 #Read in data
@@ -32,7 +33,7 @@ null_hauls<-c(40,41,159,161)
 
 #Restructure and summarise data
 #Pivot data out so sensor measurements in different columns
-Sensor_data <- fss_nmea %>%
+sensor_data <- fss_nmea %>%
   pivot_wider(names_from = SensorType, values_from = MeasurementValue) %>%
   pivot_wider(names_from = SensorID, values_from = DST) %>%
   rename(door_dist = "1", wing_dist = "7") %>%
@@ -65,7 +66,7 @@ Sensor_data <- fss_nmea %>%
 
 #Deals with door
 # Values above 250 are sensor errors, so impute with -9 and  remove
-Sensor_data <- Sensor_data %>%
+sensor_data <- sensor_data %>%
   mutate(door_dist = ifelse(door_dist >= 150, -9, door_dist)) %>%
   #values belwo 20 are physically unrealistic, replace with -9
   mutate(door_dist = ifelse(door_dist <= 20,-9, door_dist))
@@ -73,13 +74,13 @@ Sensor_data <- Sensor_data %>%
 
 
 #Deals with wing
-Sensor_data <- Sensor_data %>%
+sensor_data <- sensor_data %>%
   #Less then 5 and greater than 100 are likley shooting/hauling values
   mutate(wing_dist = ifelse(wing_dist  >= 100, -9, wing_dist)) %>%
   mutate(wing_dist = ifelse(wing_dist <= 5,-9, wing_dist))
 
 #Correct input errors for sweeps
-Sensor_data <- Sensor_data %>%
+sensor_data <- sensor_data %>%
   mutate(SweepLngt_m = fct_recode(SweepLngt_m,
                                   "L" = "l",
                                   "S" = "s")) %>%
@@ -94,13 +95,13 @@ haul_dates%>%
 )->haul_dates
 
 #Add dates to sensor data
-Sensor_data<-Sensor_data%>%
+sensor_data<-sensor_data%>%
   full_join(haul_dates,by="fldCruiseStationNumber")
 
 #Create list of non-sensor/Ship based variables
 #Crusie number, Depth, Heading, Warp , Sweep type etc
 #include station number in each to act as primary key
-ship_based_vars<-Sensor_data[,c(1:6,8,12:14,17)]
+ship_based_vars<-sensor_data[,c(1:6,8,12:14,17)]
 sbv_names<-c(colnames(ship_based_vars))
 
 ship_based_summary<-ship_based_vars%>%
@@ -112,10 +113,10 @@ ship_based_vars%>%
   distinct()
 
 #Create a list of sensor vars
-sensor_vars<-Sensor_data[,c(2,23:31)]
+sensor_vars<-sensor_data[,c(2,23:31)]
 sv_names<-c(colnames(sensor_vars))
 
-Sensor_var_sum<-Sensor_data%>%
+Sensor_var_sum<-sensor_data%>%
   group_by(fldCruiseStationNumber)%>%
   summarise(across(
     .cols = c(door_dist:TSP_across_speed), 
@@ -123,7 +124,7 @@ Sensor_var_sum<-Sensor_data%>%
     .names = "{col}_{fn}"
   ))
 
-ship_motion_vars<-Sensor_data[,c(2,9:11)]
+ship_motion_vars<-sensor_data[,c(2,9:11)]
 smv_vars<-c(colnames(ship_motion_vars))
 
 ship_motion_vars_summary<-ship_motion_vars%>%
@@ -132,10 +133,10 @@ ship_motion_vars_summary<-ship_motion_vars%>%
 
 
 #Join summary columns together using station number as a foreign/primary key
-Sensor_data_summary <-
+sensor_data_summary <-
   full_join(ship_based_summary, ship_motion_vars_summary, by = "fldCruiseStationNumber")
-Sensor_data_summary <-
-  full_join(Sensor_data_summary, Sensor_var_sum, by = "fldCruiseStationNumber") %>%
+sensor_data_summary <-
+  full_join(sensor_data_summary, Sensor_var_sum, by = "fldCruiseStationNumber") %>%
   mutate(fldShotDepth = as.numeric(fldShotDepth),
          Warp_m = as.numeric(Warp_m)) %>%
   #Filter out '-9' or flagged values
@@ -146,8 +147,8 @@ Sensor_data_summary <-
 
 
 #Save processed data files
-write.csv(Sensor_data_summary,file="../data/processed/sensor_data_summary_igfs_2018.csv")
-write.csv(Sensor_data,file="../data/processed/sensor_data_processed_igfs_2018.csv")
+write.csv(sensor_data_summary,file="../data/processed/sensor_data_summary_igfs_2018.csv")
+write.csv(sensor_data,file="../data/processed/sensor_data_processed_igfs_2018.csv")
 
 
 ##Summarise OSS data for Pitch, Heave and roll by minute
@@ -156,5 +157,17 @@ oss_underway_raw%>%
   #group by factor( minutes)
   group_by(OSS_TimeUTC,fldCruiseStationNumber)%>%
   summarise(absolute_pitch_per_min = sum(abs(as.numeric(OSS_VesselPitch))))%>%
-  write.csv(.,file="../data/processed/pitch_summarised_by_minute.csv")
+  rename(timestamp = OSS_TimeUTC)%>%
+  mutate(timestamp = as.POSIXct(timestamp))->pitch_summarised_by_minute
 
+  write.csv(pitch_summarised_by_minute,file="../data/processed/pitch_summarised_by_minute.csv")
+
+#Check for largest mean wind per haul (worst conditions)
+
+oss_underway_raw%>%
+  group_by(fldCruiseStationNumber)%>%
+  summarise(mean_wind = mean(as.numeric(OSS_TrueWindSpeed),na.rm=TRUE))%>%
+  arrange(desc(mean_wind))%>%
+  head(10)%>%
+  select(fldCruiseStationNumber)%>%
+  write.csv("../data/processed/poor_weather_hauls.csv")
